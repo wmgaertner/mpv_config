@@ -106,13 +106,21 @@ video_quality=23
 preset=faster
 # FPS / framerate. Set to "auto" or a number.
 video_fps=auto
-video_fps=60
+#video_fps=60
 
 # Audio settings
 # Available formats: opus or aac
 audio_format=opus
 # Opus sounds good at low bitrates 32-64k, but aac requires 128-256k.
 audio_bitrate=32k
+
+# Catbox.moe upload settings
+# Whether uploads should go to litterbox instead of catbox.
+# catbox files are stored permanently, while litterbox is temporary
+litterbox=yes
+# If using litterbox, time until video expires
+# Available values: 1h, 12h, 24h, 72h
+litterbox_expire=72h
 ```
 
 ### Key bindings

@@ -5,7 +5,7 @@ sort_filenames = (function()
 	local symbol_order
 	local default_order
 
-	if state.os == 'windows' then
+	if state.platform == 'windows' then
 		symbol_order = {
 			['!'] = 1, ['#'] = 2, ['$'] = 3, ['%'] = 4, ['&'] = 5, ['('] = 6, [')'] = 6, [','] = 7,
 			['.'] = 8, ["'"] = 9, ['-'] = 10, [';'] = 11, ['@'] = 12, ['['] = 13, [']'] = 13, ['^'] = 14,
@@ -23,9 +23,9 @@ sort_filenames = (function()
 
 	-- Alphanumeric sorting for humans in Lua
 	-- http://notebook.kulchenko.com/algorithms/alphanumeric-natural-sorting-for-humans-in-lua
-	local function pad_number(d)
-		local dec, n = d:match('(%.?)0*(.+)')
-		return #dec > 0 and ('%.12f'):format(d) or ('%03d%s'):format(#n, n)
+	local function pad_number(n, d)
+		return #d > 0 and ("%03d%s%.12f"):format(#n, n, tonumber(d) / (10 ^ #d))
+			or ("%03d%s"):format(#n, n)
 	end
 
 	--- In place sorting of filenames
@@ -35,7 +35,7 @@ sort_filenames = (function()
 		for i, filename in ipairs(filenames) do
 			local first_char = filename:sub(1, 1)
 			local order = symbol_order[first_char] or default_order
-			local formatted = filename:lower():gsub('%.?%d+', pad_number)
+			local formatted = filename:lower():gsub('0*(%d+)%.?(%d*)', pad_number)
 			tuples[i] = {order, formatted, filename}
 		end
 		table.sort(tuples, function(a, b)
@@ -93,6 +93,18 @@ function get_point_to_rectangle_proximity(point, rect)
 	return math.sqrt(dx * dx + dy * dy)
 end
 
+---@param point_a {x: number; y: number}
+---@param point_b {x: number; y: number}
+function get_point_to_point_proximity(point_a, point_b)
+	local dx, dy = point_a.x - point_b.x, point_a.y - point_b.y
+	return math.sqrt(dx * dx + dy * dy)
+end
+
+-- Call function with args if it exists
+function call_maybe(fn, ...)
+	if type(fn) == 'function' then fn(...) end
+end
+
 -- Extracts the properties used by property expansion of that string.
 ---@param str string
 ---@param res { [string] : boolean } | nil
@@ -130,12 +142,21 @@ function ass_escape(str)
 end
 
 ---@param seconds number
+---@param max_seconds number|nil Trims unnecessary `00:` if time is not expected to reach it.
 ---@return string
-function format_time(seconds)
+function format_time(seconds, max_seconds)
 	local human = mp.format_time(seconds)
 	if options.time_precision > 0 then
 		local formatted = string.format('%.' .. options.time_precision .. 'f', math.abs(seconds) % 1)
 		human = human .. '.' .. string.sub(formatted, 3)
+	end
+	if max_seconds then
+		local trim_length = (max_seconds < 60 and 7 or (max_seconds < 3600 and 4 or 0))
+		if trim_length > 0 then
+			local has_minus = seconds < 0
+			human = string.sub(human, trim_length + (has_minus and 1 or 0))
+			if has_minus then human = '-' .. human end
+		end
 	end
 	return human
 end
@@ -145,23 +166,26 @@ function opacity_to_alpha(opacity)
 	return 255 - math.ceil(255 * opacity)
 end
 
-do
-	local os_separator = state.os == 'windows' and '\\' or '/'
+path_separator = (function()
+	local os_separator = state.platform == 'windows' and '\\' or '/'
 
 	-- Get appropriate path separator for the given path.
 	---@param path string
 	---@return string
-	function path_separator(path)
+	return function(path)
 		return path:sub(1, 2) == '\\\\' and '\\' or os_separator
 	end
+end)()
 
-	-- Joins paths with the OS aware path separator or UNC separator.
-	---@param p1 string
-	---@param p2 string
-	---@return string
-	function utils.join_path(p1, p2)
-		return p1 .. path_separator(p1) .. p2
-	end
+-- Joins paths with the OS aware path separator or UNC separator.
+---@param p1 string
+---@param p2 string
+---@return string
+function join_path(p1, p2)
+	local p1, separator = trim_trailing_separator(p1)
+	-- Prevents joining drive letters with a redundant separator (`C:\\foo`),
+	-- as `trim_trailing_separator()` doesn't trim separators from drive letters.
+	return p1:sub(#p1) == separator and p1 .. p2 or p1 .. separator.. p2
 end
 
 -- Check if path is absolute.
@@ -169,7 +193,7 @@ end
 ---@return boolean
 function is_absolute(path)
 	if path:sub(1, 2) == '\\\\' then return true
-	elseif state.os == 'windows' then return path:find('^%a+:') ~= nil
+	elseif state.platform == 'windows' then return path:find('^%a+:') ~= nil
 	else return path:sub(1, 1) == '/' end
 end
 
@@ -178,22 +202,22 @@ end
 ---@return string
 function ensure_absolute(path)
 	if is_absolute(path) then return path end
-	return utils.join_path(state.cwd, path)
+	return join_path(state.cwd, path)
 end
 
 -- Remove trailing slashes/backslashes.
 ---@param path string
----@return string
+---@return string path, string trimmed_separator_type
 function trim_trailing_separator(path)
-	path = trim_end(path, path_separator(path))
-	if state.os == 'windows' then
+	local separator = path_separator(path)
+	path = trim_end(path, separator)
+	if state.platform == 'windows' then
 		-- Drive letters on windows need trailing backslash
-		if path:sub(#path) == ':' then return path .. '\\' end
-		return path
+		if path:sub(#path) == ':' then path = path .. '\\' end
 	else
-		if path == '' then return '/' end
-		return path
+		if path == '' then path = '/' end
 	end
+	return path, separator
 end
 
 -- Ensures path is absolute, remove trailing slashes/backslashes.
@@ -202,8 +226,8 @@ end
 ---@return string
 function normalize_path_lite(path)
 	if not path or is_protocol(path) then return path end
-	path = ensure_absolute(path)
-	return trim_trailing_separator(path)
+	path = trim_trailing_separator(ensure_absolute(path))
+	return path
 end
 
 -- Ensures path is absolute, remove trailing slashes/backslashes, normalization of path separators and deduplication.
@@ -214,12 +238,12 @@ function normalize_path(path)
 
 	path = ensure_absolute(path)
 	local is_unc = path:sub(1, 2) == '\\\\'
-	if state.os == 'windows' or is_unc then path = path:gsub('/', '\\') end
+	if state.platform == 'windows' or is_unc then path = path:gsub('/', '\\') end
 	path = trim_trailing_separator(path)
 
 	--Deduplication of path separators
 	if is_unc then path = path:gsub('(.\\)\\+', '%1')
-	elseif state.os == 'windows' then path = path:gsub('\\\\+', '\\')
+	elseif state.platform == 'windows' then path = path:gsub('\\\\+', '\\')
 	else path = path:gsub('//+', '/') end
 
 	return path
@@ -286,7 +310,7 @@ function read_directory(path, allowed_types)
 
 	for _, item in ipairs(items) do
 		if item ~= '.' and item ~= '..' then
-			local info = utils.file_info(utils.join_path(path, item))
+			local info = utils.file_info(join_path(path, item))
 			if info then
 				if info.is_file then
 					if not allowed_types or has_any_extension(item, allowed_types) then
@@ -300,21 +324,25 @@ function read_directory(path, allowed_types)
 	return files, directories
 end
 
--- Returns full absolute paths of files in the same directory as file_path,
+-- Returns full absolute paths of files in the same directory as `file_path`,
 -- and index of the current file in the table.
+-- Returned table will always contain `file_path`, regardless of `allowed_types`.
 ---@param file_path string
----@param allowed_types? string[]
+---@param allowed_types? string[] Filter adjacent file types. Does NOT filter out the `file_path`.
 function get_adjacent_files(file_path, allowed_types)
-	local current_file = serialize_path(file_path)
-	if not current_file then return end
-	local files = read_directory(current_file.dirname, allowed_types)
+	local current_meta = serialize_path(file_path)
+	if not current_meta then return end
+	local files = read_directory(current_meta.dirname)
 	if not files then return end
 	sort_filenames(files)
 	local current_file_index
 	local paths = {}
-	for index, file in ipairs(files) do
-		paths[#paths + 1] = utils.join_path(current_file.dirname, file)
-		if current_file.basename == file then current_file_index = index end
+	for _, file in ipairs(files) do
+		local is_current_file = current_meta.basename == file
+		if is_current_file or not allowed_types or has_any_extension(file, allowed_types) then
+			paths[#paths + 1] = join_path(current_meta.dirname, file)
+			if is_current_file then current_file_index = #paths end
+		end
 	end
 	if not current_file_index then return end
 	return paths, current_file_index
@@ -349,7 +377,7 @@ end
 ---@param delta number
 function navigate_directory(delta)
 	if not state.path or is_protocol(state.path) then return false end
-	local paths, current_index = get_adjacent_files(state.path, config.media_types)
+	local paths, current_index = get_adjacent_files(state.path, config.types.autoload)
 	if paths and current_index then
 		local _, path = decide_navigation_in_list(paths, current_index, delta)
 		if path then mp.commandv('loadfile', path) return true end
@@ -377,7 +405,29 @@ end
 -- `status:number(<0=error), stdout, stderr, error_string, killed_by_us:boolean`
 ---@param path string
 function delete_file(path)
-	local args = state.os == 'windows' and {'cmd', '/C', 'del', path} or {'rm', path}
+	if state.platform == 'windows' then
+		if options.use_trash then
+			local ps_code = [[
+				Add-Type -AssemblyName Microsoft.VisualBasic
+				[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('__path__', 'OnlyErrorDialogs', 'SendToRecycleBin')
+			]]
+
+			local escaped_path = string.gsub(path, "'", "''")
+            escaped_path = string.gsub(escaped_path, "’", "’’")
+            escaped_path = string.gsub(escaped_path, "%%", "%%%%")
+            ps_code = string.gsub(ps_code, "__path__", escaped_path)
+		    args = { 'powershell', '-NoProfile', '-Command', ps_code }
+		else
+			args = { 'cmd', '/C', 'del', path }
+		end
+	else
+		if options.use_trash then
+			--On Linux and Macos the app trash-cli/trash must be installed first.
+		    args = { 'trash', path }
+		else
+		    args = { 'rm', path }
+		end
+	end
 	return mp.command_native({
 		name = 'subprocess',
 		args = args,
@@ -390,10 +440,23 @@ end
 function serialize_chapter_ranges(normalized_chapters)
 	local ranges = {}
 	local simple_ranges = {
-		{name = 'openings', patterns = {'^op ', '^op$', ' op$', 'opening$'}, requires_next_chapter = true},
-		{name = 'intros', patterns = {'^intro$'}, requires_next_chapter = true},
-		{name = 'endings', patterns = {'^ed ', '^ed$', ' ed$', 'ending$', 'closing$'}},
-		{name = 'outros', patterns = {'^outro$'}},
+		{name = 'openings', patterns = {
+				'^op ', '^op$', ' op$',
+				'^opening$', ' opening$'
+			}, requires_next_chapter = true},
+		{name = 'intros', patterns = {
+				'^intro$', ' intro$',
+				'^avant$', '^prologue$'
+			}, requires_next_chapter = true},
+		{name = 'endings', patterns = {
+				'^ed ', '^ed$', ' ed$',
+				'^ending ', '^ending$', ' ending$',
+			}},
+		{name = 'outros', patterns = {
+				'^outro$', ' outro$',
+				'^closing$', '^closing ',
+				'^preview$', '^pv$',
+			}},
 	}
 	local sponsor_ranges = {}
 
@@ -417,7 +480,7 @@ function serialize_chapter_ranges(normalized_chapters)
 					if next_chapter or not meta.requires_next_chapter then
 						ranges[#ranges + 1] = table_assign({
 							start = chapter.time,
-							['end'] = next_chapter and next_chapter.time or infinity,
+							['end'] = next_chapter and next_chapter.time or INFINITY,
 						}, config.chapter_ranges[meta.name])
 					end
 				end
@@ -446,7 +509,7 @@ function serialize_chapter_ranges(normalized_chapters)
 				local next_chapter = chapters[i + 1]
 				ranges[#ranges + 1] = table_assign({
 					start = chapter.time,
-					['end'] = next_chapter and next_chapter.time or infinity,
+					['end'] = next_chapter and next_chapter.time or INFINITY,
 				}, config.chapter_ranges.ads)
 			end
 		end
@@ -499,7 +562,10 @@ end
 --[[ RENDERING ]]
 
 function render()
+	if not display.initialized then return end
 	state.render_last_time = mp.get_time()
+
+	cursor.reset_handlers()
 
 	-- Actual rendering
 	local ass = assdraw.ass_new()
@@ -513,6 +579,8 @@ function render()
 			end
 		end
 	end
+
+	cursor.decide_keybinds()
 
 	-- submit
 	if osd.res_x == display.width and osd.res_y == display.height and osd.data == ass.text then

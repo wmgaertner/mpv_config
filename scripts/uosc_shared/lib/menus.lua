@@ -1,25 +1,32 @@
 ---@param data MenuData
----@param opts? {submenu?: string; mouse_nav?: boolean}
+---@param opts? {submenu?: string; mouse_nav?: boolean; on_close?: string | string[]}
 function open_command_menu(data, opts)
-	local menu = Menu:open(data, function(value)
-		if type(value) == 'string' then
-			mp.command(value)
+	local function run_command(command)
+		if type(command) == 'string' then
+			mp.command(command)
 		else
 			---@diagnostic disable-next-line: deprecated
-			mp.commandv(unpack(value))
+			mp.commandv(unpack(command))
 		end
-	end, opts)
+	end
+	---@type MenuOptions
+	local menu_opts = {}
+	if opts then
+		menu_opts.mouse_nav = opts.mouse_nav
+		if opts.on_close then menu_opts.on_close = function() run_command(opts.on_close) end end
+	end
+	local menu = Menu:open(data, run_command, menu_opts)
 	if opts and opts.submenu then menu:activate_submenu(opts.submenu) end
 	return menu
 end
 
----@param opts? {submenu?: string; mouse_nav?: boolean}
+---@param opts? {submenu?: string; mouse_nav?: boolean; on_close?: string | string[]}
 function toggle_menu_with_items(opts)
 	if Menu:is_open('menu') then Menu:close()
 	else open_command_menu({type = 'menu', items = config.menu_items}, opts) end
 end
 
----@param options {type: string; title: string; list_prop: string; active_prop?: string; serializer: fun(list: any, active: any): MenuDataItem[]; on_select: fun(value: any)}
+---@param options {type: string; title: string; list_prop: string; active_prop?: string; serializer: fun(list: any, active: any): MenuDataItem[]; on_select: fun(value: any); on_move_item?: fun(from_index: integer, to_index: integer, submenu_path: integer[]); on_delete_item?: fun(index: integer, submenu_path: integer[])}
 function create_self_updating_menu_opener(options)
 	return function()
 		if Menu:is_open(options.type) then Menu:close() return end
@@ -58,6 +65,8 @@ function create_self_updating_menu_opener(options)
 				mp.unobserve_property(handle_list_prop_change)
 				mp.unobserve_property(handle_active_prop_change)
 			end,
+			on_move_item = options.on_move_item,
+			on_delete_item = options.on_delete_item,
 		})
 	end
 end
@@ -159,6 +168,7 @@ function open_file_navigation_menu(directory_path, handle_select, opts)
 
 	local files, directories = read_directory(directory.path, opts.allowed_types)
 	local is_root = not directory.dirname
+	local path_separator = path_separator(directory.path)
 
 	if not files or not directories then return end
 
@@ -170,78 +180,81 @@ function open_file_navigation_menu(directory_path, handle_select, opts)
 	local items = {}
 
 	if is_root then
-		if state.os == 'windows' then
-			items[#items + 1] = {
-				title = '..', hint = 'Drives', value = {is_drives = true, is_to_parent = true}, separator = true,
-			}
+		if state.platform == 'windows' then
+			items[#items + 1] = {title = '..', hint = 'Drives', value = '{drives}', separator = true}
 		end
 	else
-		local serialized = serialize_path(directory.dirname)
-		serialized.is_directory = true
-		serialized.is_to_parent = true
-		items[#items + 1] = {title = '..', hint = 'parent dir', value = serialized, separator = true}
+		items[#items + 1] = {title = '..', hint = 'parent dir', value = directory.dirname, separator = true}
 	end
 
-	local items_start_index = #items + 1
+	local back_path = items[#items] and items[#items].value
+	local selected_index = #items + 1
 
-	local path_separator = path_separator(directory.path)
 	for _, dir in ipairs(directories) do
-		local serialized = serialize_path(utils.join_path(directory.path, dir))
-		if serialized then
-			serialized.is_directory = true
-			items[#items + 1] = {title = serialized.basename, value = serialized, hint = path_separator}
-		end
+		items[#items + 1] = {title = dir, value = join_path(directory.path, dir), hint = path_separator}
 	end
 
 	for _, file in ipairs(files) do
-		local serialized = serialize_path(utils.join_path(directory.path, file))
-		if serialized then
-			serialized.is_file = true
-			items[#items + 1] = {title = serialized.basename, value = serialized}
-		end
+		items[#items + 1] = {title = file, value = join_path(directory.path, file)}
 	end
 
 	for index, item in ipairs(items) do
-		if not item.value.is_to_parent then
-			if index == items_start_index then item.selected = true end
-
-			if opts.active_path == item.value.path then
-				item.active = true
-				if not opts.selected_path then item.selected = true end
-			end
-
-			if opts.selected_path == item.value.path then item.selected = true end
+		if not item.value.is_to_parent and opts.active_path == item.value then
+			item.active = true
+			if not opts.selected_path then selected_index = index end
 		end
+
+		if opts.selected_path == item.value then selected_index = index end
 	end
 
-	local menu_data = {
-		type = opts.type, title = opts.title or directory.basename .. path_separator, items = items,
-		on_open = opts.on_open, on_close = opts.on_close,
-	}
-
-	return Menu:open(menu_data, function(path)
+	---@type MenuCallback
+	local function open_path(path, meta)
+		local is_drives = path == '{drives}'
+		local is_to_parent = is_drives or #path < #directory_path
 		local inheritable_options = {
 			type = opts.type, title = opts.title, allowed_types = opts.allowed_types, active_path = opts.active_path,
 		}
 
-		if path.is_drives then
+		if is_drives then
 			open_drives_menu(function(drive_path)
 				open_file_navigation_menu(drive_path, handle_select, inheritable_options)
-			end, {type = inheritable_options.type, title = inheritable_options.title, selected_path = directory.path})
+			end, {
+				type = inheritable_options.type, title = inheritable_options.title, selected_path = directory.path,
+				on_open = opts.on_open, on_close = opts.on_close,
+			})
 			return
 		end
 
-		if path.is_directory then
+		local info, error = utils.file_info(path)
+
+		if not info then
+			msg.error('Can\'t retrieve path info for "' .. path .. '". Error: ' .. (error or ''))
+			return
+		end
+
+		if info.is_dir and not meta.modifiers.ctrl then
 			--  Preselect directory we are coming from
-			if path.is_to_parent then
+			if is_to_parent then
 				inheritable_options.selected_path = directory.path
 			end
 
-			open_file_navigation_menu(path.path, handle_select, inheritable_options)
+			open_file_navigation_menu(path, handle_select, inheritable_options)
 		else
-			handle_select(path.path)
+			handle_select(path)
 		end
-	end)
+	end
+
+	local function handle_back()
+		if back_path then open_path(back_path, {modifiers = {}}) end
+	end
+
+	local menu_data = {
+		type = opts.type, title = opts.title or directory.basename .. path_separator, items = items,
+		selected_index = selected_index,
+	}
+	local menu_options = {on_open = opts.on_open, on_close = opts.on_close, on_back = handle_back}
+
+	return Menu:open(menu_data, open_path, menu_options)
 end
 
 -- Opens a file navigation menu with Windows drives as items.
@@ -255,7 +268,7 @@ function open_drives_menu(handle_select, opts)
 		playback_only = false,
 		args = {'wmic', 'logicaldisk', 'get', 'name', '/value'},
 	})
-	local items = {}
+	local items, selected_index = {}, 1
 
 	if process.status == 0 then
 		for _, value in ipairs(split(process.stdout, '\n')) do
@@ -263,15 +276,17 @@ function open_drives_menu(handle_select, opts)
 			if drive then
 				local drive_path = normalize_path(drive)
 				items[#items + 1] = {
-					title = drive, hint = 'Drive', value = drive_path,
-					selected = opts.selected_path == drive_path,
-					active = opts.active_path == drive_path,
+					title = drive, hint = 'drive', value = drive_path, active = opts.active_path == drive_path,
 				}
+				if opts.selected_path == drive_path then selected_index = #items end
 			end
 		end
 	else
 		msg.error(process.stderr)
 	end
 
-	return Menu:open({type = opts.type, title = opts.title or 'Drives', items = items}, handle_select)
+	return Menu:open(
+		{type = opts.type, title = opts.title or 'Drives', items = items, selected_index = selected_index},
+		handle_select
+	)
 end

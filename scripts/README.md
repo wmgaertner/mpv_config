@@ -12,5 +12,5 @@ Automatically download subtitles
 Skips forward until silent section is detected (useful for skipping openings)
 * [webtorrent](https://github.com/mrxdst/webtorrent-mpv-hook)  
 Use webtorrent to stream torrents directly to mpv
-* [bookmarker-menu](https://github.com/NurioHin/mpv-bookmarker)
+* [bookmarker-menu](https://github.com/NurioHin/mpv-bookmarker)  
 Set bookmarks to remember timestamps in unfinished media
